@@ -24,7 +24,7 @@ export interface Transaction {
   // Cuotas / Installments
   installmentCurrent?: number;
   installmentTotal?: number;
-  parentId?: number; // Links split installments together
+  parentId?: number | string; // Links split installments together
 }
 
 export interface NotificationTrigger {

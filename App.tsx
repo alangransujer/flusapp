@@ -23,6 +23,7 @@ import {
    requestNotificationPermission
 } from './services/notificationService';
 import { useAuth } from './src/context/AuthContext';
+import { supabase } from './src/lib/supabaseClient';
 import Login from './src/components/Login';
 import Register from './src/components/Register';
 import FamilyManager from './src/components/FamilyManager';
@@ -251,11 +252,15 @@ export default function App() {
    }, []);
 
    useEffect(() => {
-      localStorage.setItem('expenseTrackerData_v4', JSON.stringify({
-         families, transactions, recurringPatterns, users,
-         expenseCategories, incomeCategories, paymentMethods, creditCardConfigs,
-         baseCurrency, exchangeRates, currencies, lastRatesUpdate, theme
-      }));
+      // Only save if we have some data or families to persist
+      // This is a safety check to avoid overwriting with empty state during transition/logout
+      if (families.length > 0 || transactions.length > 0) {
+         localStorage.setItem('expenseTrackerData_v4', JSON.stringify({
+            families, transactions, recurringPatterns, users,
+            expenseCategories, incomeCategories, paymentMethods, creditCardConfigs,
+            baseCurrency, exchangeRates, currencies, lastRatesUpdate, theme
+         }));
+      }
    }, [families, transactions, recurringPatterns, users, expenseCategories, incomeCategories, paymentMethods, creditCardConfigs, baseCurrency, exchangeRates, currencies, lastRatesUpdate, theme]);
 
    useEffect(() => {
@@ -278,16 +283,191 @@ export default function App() {
       setCurrentFamily(null);
       setCurrentUser(null);
       setView('dashboard');
-      // Clear data to prevent leakage between users
+      // Clear memory on logout to ensure privacy between users on same device
       setTransactions([]);
       setRecurringPatterns([]);
       setUsers([]);
-      // We keep categories and configs for now as they are often generic,
-      // but ideally they should also be family-scoped and loaded from DB.
+      setCreditCardConfigs({});
+   };
+
+   const migrateLocalDataToCloud = async (familyId: string | number) => {
+      if (!familyId || !currentUser) return;
+
+      console.log("Starting migration to cloud for family:", familyId);
+
+      // 1. Migrate Transactions
+      const localTxs = transactions.filter(t => t.familyId === familyId);
+      if (localTxs.length > 0) {
+         const dbTxs = localTxs.map(tx => ({
+            id: tx.id,
+            family_id: familyId,
+            user_id: tx.userId,
+            user_name: tx.userName,
+            type: tx.type,
+            amount: tx.amount,
+            currency: tx.currency,
+            description: tx.description,
+            title: tx.title,
+            category: tx.category,
+            sub_category: tx.subCategory,
+            payment_method: tx.paymentMethod,
+            payment_sub_method: tx.paymentSubMethod,
+            notes: tx.notes,
+            created_at: tx.createdDate,
+            installment_current: tx.installmentCurrent,
+            installment_total: tx.installmentTotal,
+            parent_id: tx.parentId
+         }));
+         await supabase.from('transactions').insert(dbTxs);
+      }
+
+      // 2. Migrate Cards
+      const cardNames = Object.keys(creditCardConfigs);
+      if (cardNames.length > 0) {
+         const dbCards = cardNames.map(name => {
+            const config = creditCardConfigs[name];
+            return {
+               family_id: familyId,
+               sub_category: config.subCategory,
+               bank_name: config.bankName,
+               card_network: config.cardNetwork,
+               last4: config.last4,
+               card_limit: config.limit,
+               color: config.color,
+               closing_rule: config.closingRule,
+               closing_day: config.closingDay,
+               payment_due_gap: config.paymentDueGap
+            };
+         });
+         await supabase.from('credit_card_configs').upsert(dbCards);
+      }
+
+      // 3. Migrate Patterns
+      const localPatterns = recurringPatterns.filter(p => p.familyId === familyId);
+      if (localPatterns.length > 0) {
+         const dbPatterns = localPatterns.map(p => ({
+            family_id: familyId,
+            user_id: p.userId,
+            type: p.type,
+            amount: p.amount,
+            currency: p.currency,
+            description: p.description,
+            title: p.title,
+            category: p.category,
+            sub_category: p.subCategory,
+            payment_method: p.paymentMethod,
+            payment_sub_method: p.paymentSubMethod,
+            frequency: p.frequency,
+            next_due_date: p.nextDueDate,
+            due_pattern: p.duePattern,
+            day_of_month: p.dayOfMonth,
+            notes: p.notes
+         }));
+         await supabase.from('recurring_patterns').insert(dbPatterns);
+      }
+
+      console.log("Migration completed.");
+      // Re-fetch to confirm
+      fetchFamilyData(familyId);
+   };
+
+   const fetchFamilyData = async (familyId: string | number) => {
+      if (!familyId) return;
+
+      // Fetch Transactions
+      const { data: txs, error: txError } = await supabase
+         .from('transactions')
+         .select('*')
+         .eq('family_id', familyId);
+
+      const hasCloudData = (txs && txs.length > 0);
+
+      if (!txError && txs) {
+         setTransactions(txs.map(t => ({
+            id: t.id,
+            familyId: t.family_id,
+            userId: t.user_id,
+            userName: t.user_name,
+            type: t.type,
+            amount: t.amount,
+            currency: t.currency,
+            description: t.description,
+            title: t.title,
+            category: t.category,
+            subCategory: t.sub_category,
+            paymentMethod: t.payment_method,
+            paymentSubMethod: t.payment_sub_method,
+            notes: t.notes,
+            createdDate: t.created_at,
+            installmentCurrent: t.installment_current,
+            installmentTotal: t.installment_total,
+            parentId: t.parent_id
+         })));
+      }
+
+      // Fetch Cards
+      const { data: cards, error: cardError } = await supabase
+         .from('credit_card_configs')
+         .select('*')
+         .eq('family_id', familyId);
+
+      if (!cardError && cards) {
+         const configs: Record<string, CreditCardConfig> = {};
+         cards.forEach(c => {
+            configs[c.sub_category] = {
+               subCategory: c.sub_category,
+               bankName: c.bank_name,
+               cardNetwork: c.card_network,
+               last4: c.last4,
+               limit: c.card_limit,
+               color: c.color,
+               closingRule: c.closing_rule,
+               closingDay: c.closing_day,
+               paymentDueGap: c.payment_due_gap
+            };
+         });
+         setCreditCardConfigs(configs);
+         if (cards.length > 0) { /* already have card data on cloud */ }
+      }
+
+      // Fetch Patterns
+      const { data: patterns, error: patternError } = await supabase
+         .from('recurring_patterns')
+         .select('*')
+         .eq('family_id', familyId);
+
+      if (!patternError && patterns) {
+         setRecurringPatterns(patterns.map(p => ({
+            id: p.id,
+            familyId: p.family_id,
+            userId: p.user_id,
+            type: p.type,
+            amount: p.amount,
+            currency: p.currency,
+            description: p.description,
+            title: p.title,
+            category: p.category,
+            subCategory: p.sub_category,
+            paymentMethod: p.payment_method,
+            paymentSubMethod: p.payment_sub_method,
+            frequency: p.frequency,
+            nextDueDate: p.next_due_date,
+            duePattern: p.due_pattern,
+            dayOfMonth: p.day_of_month,
+            notes: p.notes
+         })));
+      }
+
+      // AUTO MIGRATION CHECK
+      // If no data on cloud but we have local data, migrate it!
+      if (!hasCloudData && (transactions.filter(t => t.familyId === familyId).length > 0)) {
+         migrateLocalDataToCloud(familyId);
+      }
    };
 
    const onFamilySelected = (family: Family) => {
       setCurrentFamily(family);
+      fetchFamilyData(family.id);
       // Ensure the selected family is in our local list for consistent UI
       setFamilies(prev => {
          if (prev.find(f => f.id === family.id)) return prev;
@@ -295,7 +475,14 @@ export default function App() {
       });
       // Find or create local user mapping for this session
       if (supabaseUser) {
-         // Here we ideally sync with the 'users' table in DB, but for now we map locally
+         // Sync profile with Supabase to enable RLS based on family_id
+         supabase.from('profiles').upsert([{
+            id: supabaseUser.id,
+            email: supabaseUser.email,
+            family_id: family.id,
+            updated_at: new Date().toISOString()
+         }]).then(({ error }) => { if (error) console.error("Error syncing profile:", error); });
+
          const localUser: User = {
             id: supabaseUser.id,
             email: supabaseUser.email || '',
@@ -334,7 +521,7 @@ export default function App() {
       setIsEditingProfile(false);
    };
 
-   const handleUpdateUserRole = (targetUserId: number, newRole: 'admin' | 'member') => {
+   const handleUpdateUserRole = (targetUserId: number | string, newRole: 'admin' | 'member') => {
       if (currentUser?.role !== 'admin') return;
       if (targetUserId === currentUser.id) return alert("No puedes cambiar tu propio rol.");
 
@@ -392,8 +579,6 @@ export default function App() {
          // Determine dayOfMonth if fixed monthly pattern
          let anchorDay: number | undefined = undefined;
          if (formData.frequency === 'monthly' && formData.duePattern === 'fixed') {
-            const datePart = new Date(formData.dueDate);
-            // Important: use GetDate (local) to avoid timezone shifts if string is strictly YYYY-MM-DD
             anchorDay = parseInt(formData.dueDate.split('-')[2]);
          }
 
@@ -413,15 +598,37 @@ export default function App() {
             frequency: formData.frequency,
             nextDueDate: formData.dueDate,
             duePattern: formData.duePattern,
-            dayOfMonth: anchorDay, // New field to support non-destructive overrides
+            dayOfMonth: anchorDay,
             notes: formData.notes,
             notificationTriggers: formData.notificationTriggers
          };
+
+         // SYNC WITH SUPABASE
+         supabase.from('recurring_patterns').upsert([{
+            id: newPattern.id.toString().length > 15 ? newPattern.id : undefined, // only use id if it's a UUID/long string
+            family_id: newPattern.familyId,
+            user_id: newPattern.userId,
+            type: newPattern.type,
+            amount: newPattern.amount,
+            currency: newPattern.currency,
+            description: newPattern.description,
+            title: newPattern.title,
+            category: newPattern.category,
+            sub_category: newPattern.subCategory,
+            payment_method: newPattern.paymentMethod,
+            payment_sub_method: newPattern.paymentSubMethod,
+            frequency: newPattern.frequency,
+            next_due_date: newPattern.nextDueDate,
+            due_pattern: newPattern.duePattern,
+            day_of_month: newPattern.dayOfMonth,
+            notes: newPattern.notes
+         }]).then(({ error }) => { if (error) console.error("Error syncing pattern:", error); });
+
          setRecurringPatterns(prev => editingPattern ? prev.map(p => p.id === editingPattern.id ? newPattern : p) : [...prev, newPattern]);
       } else {
          const installments = formData.installments > 1 ? formData.installments : 1;
          const amountPerQuota = parseFloat((finalAmount / installments).toFixed(2));
-         const parentId = Date.now();
+         const parentId = Date.now().toString();
 
          if (originalTx) {
             const updatedTx: Transaction = {
@@ -431,22 +638,73 @@ export default function App() {
                paymentMethod: formData.paymentMethod, paymentSubMethod: formData.paymentSubMethod,
                notes: formData.notes, createdDate: formData.expirationDate ? new Date(formData.expirationDate + 'T12:00:00').toISOString() : originalTx.createdDate
             };
+
+            // SYNC WITH SUPABASE
+            supabase.from('transactions').upsert([{
+               id: updatedTx.id,
+               family_id: updatedTx.familyId,
+               user_id: updatedTx.userId,
+               user_name: updatedTx.userName,
+               type: updatedTx.type,
+               amount: updatedTx.amount,
+               currency: updatedTx.currency,
+               description: updatedTx.description,
+               title: updatedTx.title,
+               category: updatedTx.category,
+               sub_category: updatedTx.subCategory,
+               payment_method: updatedTx.paymentMethod,
+               payment_sub_method: updatedTx.paymentSubMethod,
+               notes: updatedTx.notes,
+               created_at: updatedTx.createdDate
+            }]).then(({ error }) => { if (error) console.error("Error updating transaction:", error); });
+
             setTransactions(prev => prev.map(t => t.id === originalTx.id ? updatedTx : t));
          } else {
             const newTxs: Transaction[] = [];
+            const dbTxs: any[] = [];
             const baseDate = formData.expirationDate ? new Date(formData.expirationDate + 'T12:00:00') : new Date();
+
             for (let i = 0; i < installments; i++) {
-               newTxs.push({
-                  id: Date.now() + i, familyId: currentFamily.id, userId: currentUser.id, userName: currentUser.name,
+               const txId = (Date.now() + i).toString();
+               const createdDate = addMonthsSafe(baseDate, i).toISOString();
+
+               const tx: Transaction = {
+                  id: txId, familyId: currentFamily.id, userId: currentUser.id, userName: currentUser.name,
                   type: formData.type, amount: amountPerQuota, currency: formData.currency,
                   description: formData.description, title: formData.title,
                   category: formData.category, subCategory: formData.subCategory,
                   paymentMethod: formData.paymentMethod, paymentSubMethod: formData.paymentSubMethod,
-                  notes: formData.notes, createdDate: addMonthsSafe(baseDate, i).toISOString(),
+                  notes: formData.notes, createdDate: createdDate,
                   installmentCurrent: installments > 1 ? i + 1 : undefined, installmentTotal: installments > 1 ? installments : undefined,
                   parentId: installments > 1 ? parentId : undefined
+               };
+               newTxs.push(tx);
+
+               dbTxs.push({
+                  id: tx.id,
+                  family_id: tx.familyId,
+                  user_id: tx.userId,
+                  user_name: tx.userName,
+                  type: tx.type,
+                  amount: tx.amount,
+                  currency: tx.currency,
+                  description: tx.description,
+                  title: tx.title,
+                  category: tx.category,
+                  sub_category: tx.subCategory,
+                  payment_method: tx.paymentMethod,
+                  payment_sub_method: tx.paymentSubMethod,
+                  notes: tx.notes,
+                  created_at: tx.createdDate,
+                  installment_current: tx.installmentCurrent,
+                  installment_total: tx.installmentTotal,
+                  parent_id: tx.parentId
                });
             }
+
+            // SYNC WITH SUPABASE
+            supabase.from('transactions').insert(dbTxs).then(({ error }) => { if (error) console.error("Error inserting transactions:", error); });
+
             setTransactions(prev => [...prev, ...newTxs]);
          }
       }
@@ -605,11 +863,24 @@ export default function App() {
          [cardName]: config
       }));
 
-      setIsAddingCard(false);
-      setEditingCardName(null);
+      // SYNC WITH SUPABASE
+      if (currentFamily) {
+         supabase.from('credit_card_configs').upsert([{
+            family_id: currentFamily.id,
+            sub_category: config.subCategory,
+            bank_name: config.bankName,
+            card_network: config.cardNetwork,
+            last4: config.last4,
+            card_limit: config.limit,
+            color: config.color,
+            closing_rule: config.closingRule,
+            closing_day: config.closingDay,
+            payment_due_gap: config.paymentDueGap
+         }]).then(({ error }) => { if (error) console.error("Error syncing card:", error); });
+      }
    };
 
-   const deleteUser = (id: number) => {
+   const deleteUser = (id: number | string) => {
       if (currentUser?.role !== 'admin') return; // Security check
       if (familyUsers.length <= 1) return alert("Cannot delete last user");
       if (confirm("Delete this user?")) {
