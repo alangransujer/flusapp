@@ -2,7 +2,6 @@
 export interface Family {
   id: number | string;
   name: string;
-  joinCode: string; // Simple code to share
   createdDate: string;
 }
 

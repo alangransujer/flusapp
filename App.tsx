@@ -218,7 +218,7 @@ export default function App() {
          const defaultFamilyId = 1;
          let loadedFamilies = data.families || [];
          if (loadedFamilies.length === 0 && data.users?.length > 0) {
-            loadedFamilies = [{ id: defaultFamilyId, name: 'My Family', joinCode: '1000', createdDate: new Date().toISOString() }];
+            loadedFamilies = [{ id: defaultFamilyId, name: 'My Family', createdDate: new Date().toISOString() }];
          }
 
          setTransactions((data.transactions || []).map((t: any) => ({ ...t, familyId: t.familyId || defaultFamilyId })));
@@ -1914,10 +1914,6 @@ export default function App() {
                         <p className="font-bold text-gray-900 dark:text-white">{currentFamily?.name}</p>
                      )}
                   </div>
-                  <div className="text-right">
-                     <p className="text-xs text-gray-500 uppercase">Código de Unión</p>
-                     <p className="font-mono text-xl font-bold tracking-widest text-blue-600 dark:text-blue-400">{currentFamily?.joinCode}</p>
-                  </div>
                </div>
 
                <h4 className="font-bold text-sm mb-3 text-gray-900 dark:text-white">Usuarios del Grupo</h4>
@@ -2003,7 +1999,7 @@ export default function App() {
                   <LogOut className="w-4 h-4" /> Cerrar Sesión
                </button>
             </div>
-         </div>
+         </div >
       );
    };
 
