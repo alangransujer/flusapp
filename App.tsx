@@ -278,10 +278,21 @@ export default function App() {
       setCurrentFamily(null);
       setCurrentUser(null);
       setView('dashboard');
+      // Clear data to prevent leakage between users
+      setTransactions([]);
+      setRecurringPatterns([]);
+      setUsers([]);
+      // We keep categories and configs for now as they are often generic,
+      // but ideally they should also be family-scoped and loaded from DB.
    };
 
    const onFamilySelected = (family: Family) => {
       setCurrentFamily(family);
+      // Ensure the selected family is in our local list for consistent UI
+      setFamilies(prev => {
+         if (prev.find(f => f.id === family.id)) return prev;
+         return [...prev, family];
+      });
       // Find or create local user mapping for this session
       if (supabaseUser) {
          // Here we ideally sync with the 'users' table in DB, but for now we map locally
@@ -615,12 +626,14 @@ export default function App() {
          delete newConfigs[editingCardName];
          setCreditCardConfigs(newConfigs);
 
-         // Remove from Payment Methods
-         const methodType = (paymentMethods['Credit Card'] || []).includes(editingCardName) ? 'Credit Card' : 'Debit Card';
-         setPaymentMethods(prev => ({
-            ...prev,
-            [methodType]: prev[methodType].filter(c => c !== editingCardName)
-         }));
+         // Remove from Payment Methods (Across all categories)
+         setPaymentMethods(prev => {
+            const updated = { ...prev };
+            Object.keys(updated).forEach(type => {
+               updated[type] = updated[type].filter(c => c !== editingCardName);
+            });
+            return updated;
+         });
 
          setIsAddingCard(false);
          setEditingCardName(null);

@@ -60,16 +60,27 @@ export default function FamilyManager({ onSelectFamily }: FamilyManagerProps) {
         <div className="p-6 border rounded-xl shadow-sm bg-white dark:bg-gray-800 mt-4 transition-colors">
             <h3 className="text-xl font-bold mb-6 text-gray-800 dark:text-white">Family Access</h3>
 
-            {error && <div className="p-3 mb-4 text-sm text-red-700 bg-red-100 rounded-lg">{error}</div>}
+            {error && <div className="p-3 mb-4 text-sm text-red-700 bg-red-100 rounded-lg flex justify-between items-center">
+                {error}
+                <button onClick={fetchFamilies} className="underline font-bold">Retry</button>
+            </div>}
             {successMsg && <div className="p-3 mb-4 text-sm text-green-700 bg-green-100 rounded-lg">{successMsg}</div>}
 
             <div className="grid md:grid-cols-2 gap-8">
                 {/* Section 1: Choose Family */}
                 <div className="space-y-4">
-                    <h4 className="font-semibold text-gray-700 dark:text-gray-300">Choose Family</h4>
+                    <div className="flex justify-between items-center">
+                        <h4 className="font-semibold text-gray-700 dark:text-gray-300">Choose Family</h4>
+                        <button onClick={fetchFamilies} className="text-xs text-blue-600 hover:underline">Refresh</button>
+                    </div>
                     <div className="space-y-2 max-h-60 overflow-y-auto pr-2">
-                        {loading && <p className="text-sm text-gray-500">Loading families...</p>}
-                        {!loading && families.length === 0 && <p className="text-sm text-gray-500">No families found.</p>}
+                        {loading && <p className="text-sm text-gray-500 italic">Syncing with database...</p>}
+                        {!loading && families.length === 0 && (
+                            <div className="p-4 text-center border-2 border-dashed rounded-lg dark:border-gray-700">
+                                <p className="text-sm text-gray-500">No families found on your account.</p>
+                                <p className="text-xs text-gray-400 mt-1">If someone invited you, ensure you are using the same database.</p>
+                            </div>
+                        )}
                         {families.map(family => (
                             <div key={family.id} className="p-3 border rounded-lg flex justify-between items-center hover:bg-gray-50 dark:hover:bg-gray-700 dark:border-gray-600 transition-colors">
                                 <div>
