@@ -9,8 +9,10 @@ export const sendMessageToGemini = async (
   history: ChatMessage[]
 ): Promise<string> => {
   try {
-    const apiKey = import.meta.env.VITE_API_KEY;
+    // Fix: Check both import.meta.env and process.env (fallback)
+    const apiKey = import.meta.env.VITE_API_KEY || (process.env.GEMINI_API_KEY as string);
     if (!apiKey) {
+      console.error("Gemini API Key is missing. Checked VITE_API_KEY and GEMINI_API_KEY.");
       throw new Error("VITE_API_KEY is not defined");
     }
 

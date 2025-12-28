@@ -82,7 +82,7 @@ export default function App() {
    const familyUsers = users.filter(u => u.familyId === currentFamily?.id);
 
    // Settings & Config
-   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
+   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('dark');
    const [baseCurrency, setBaseCurrency] = useState('ARS');
    const [currencies, setCurrencies] = useState<{ code: string, symbol: string }[]>([
       { code: 'ARS', symbol: '$' },
@@ -241,7 +241,13 @@ export default function App() {
          setLastRatesUpdate(data.lastRatesUpdate || null);
          setTheme(data.theme || 'system');
       }
-      getAIStudio().hasSelectedApiKey().then(setHasApiKey);
+      const aiStudio = getAIStudio();
+      if (aiStudio && aiStudio.hasSelectedApiKey) {
+         aiStudio.hasSelectedApiKey().then(setHasApiKey);
+      } else {
+         // Local environment fallback
+         setHasApiKey(!!import.meta.env.VITE_API_KEY);
+      }
    }, []);
 
    useEffect(() => {
@@ -294,14 +300,20 @@ export default function App() {
    // --- USER PROFILE HANDLERS ---
    const handleEditProfile = () => {
       if (!currentUser) return;
-      setProfileForm(currentUser);
+      // Split name into first and last if not already set, for editing convenience
+      const parts = currentUser.name.split(' ');
+      const firstName = currentUser.firstName || parts[0] || '';
+      const lastName = currentUser.lastName || parts.slice(1).join(' ') || '';
+
+      setProfileForm({ ...currentUser, firstName, lastName });
       setIsEditingProfile(true);
    };
 
    const handleSaveProfile = () => {
       if (!currentUser || !profileForm) return;
 
-      const updatedUser = { ...currentUser, ...profileForm };
+      const fullName = `${profileForm.firstName || ''} ${profileForm.lastName || ''}`.trim();
+      const updatedUser = { ...currentUser, ...profileForm, name: fullName || currentUser.name };
 
       // Update local users array
       setUsers(users.map(u => u.id === currentUser.id ? updatedUser : u));
@@ -595,6 +607,90 @@ export default function App() {
       }
    };
 
+   const handleDeleteCard = () => {
+      if (!editingCardName) return;
+      if (confirm(`¿Eliminar la tarjeta "${editingCardName}"? Esto no borrará las transacciones históricas, pero quitará la tarjeta de tus métodos de pago.`)) {
+         // Remove from config
+         const newConfigs = { ...creditCardConfigs };
+         delete newConfigs[editingCardName];
+         setCreditCardConfigs(newConfigs);
+
+         // Remove from Payment Methods
+         const methodType = (paymentMethods['Credit Card'] || []).includes(editingCardName) ? 'Credit Card' : 'Debit Card';
+         setPaymentMethods(prev => ({
+            ...prev,
+            [methodType]: prev[methodType].filter(c => c !== editingCardName)
+         }));
+
+         setIsAddingCard(false);
+         setEditingCardName(null);
+      }
+   };
+
+   // --- SETTINGS HANDLERS ---
+   const handleAddCategory = () => {
+      if (!manageNewItem.trim()) return;
+      if (manageCatType === 'expense') {
+         if (expenseCategories[manageNewItem]) return alert("Category exists");
+         setExpenseCategories(prev => ({ ...prev, [manageNewItem]: [] }));
+      } else {
+         if (incomeCategories[manageNewItem]) return alert("Category exists");
+         setIncomeCategories(prev => ({ ...prev, [manageNewItem]: [] }));
+      }
+      setManageNewItem('');
+   };
+
+   const handleDeleteCategory = (name: string) => {
+      if (!confirm(`Delete category "${name}"?`)) return;
+      if (manageCatType === 'expense') {
+         const newCats = { ...expenseCategories };
+         delete newCats[name];
+         setExpenseCategories(newCats);
+      } else {
+         const newCats = { ...incomeCategories };
+         delete newCats[name];
+         setIncomeCategories(newCats);
+      }
+   };
+
+   const handleAddSubCategory = () => {
+      if (!manageSelectedParent || !manageNewSubItem.trim()) return;
+      if (manageCatType === 'expense') {
+         const subs = expenseCategories[manageSelectedParent] || [];
+         if (subs.includes(manageNewSubItem)) return;
+         setExpenseCategories(prev => ({ ...prev, [manageSelectedParent]: [...subs, manageNewSubItem] }));
+      } else {
+         const subs = incomeCategories[manageSelectedParent] || [];
+         if (subs.includes(manageNewSubItem)) return;
+         setIncomeCategories(prev => ({ ...prev, [manageSelectedParent]: [...subs, manageNewSubItem] }));
+      }
+      setManageNewSubItem('');
+   };
+
+   const handleDeleteSubCategory = (parent: string, sub: string) => {
+      if (!confirm(`Delete sub-category "${sub}"?`)) return;
+      if (manageCatType === 'expense') {
+         setExpenseCategories(prev => ({ ...prev, [parent]: prev[parent].filter(s => s !== sub) }));
+      } else {
+         setIncomeCategories(prev => ({ ...prev, [parent]: prev[parent].filter(s => s !== sub) }));
+      }
+   };
+
+   const handleAddMethod = () => {
+      if (!manageNewItem.trim()) return;
+      if (paymentMethods[manageNewItem]) return alert("Method exists");
+      setPaymentMethods(prev => ({ ...prev, [manageNewItem]: [] }));
+      setManageNewItem('');
+   };
+
+   const handleDeleteMethod = (name: string) => {
+      if (['Cash', 'Debit Card', 'Credit Card'].includes(name)) return alert("Cannot delete system methods");
+      if (!confirm(`Delete method "${name}"?`)) return;
+      const newMethods = { ...paymentMethods };
+      delete newMethods[name];
+      setPaymentMethods(newMethods);
+   };
+
    // --- RENDERERS ---
 
    const renderCards = () => {
@@ -817,7 +913,14 @@ export default function App() {
                            </div>
                         </div>
 
-                        <button onClick={handleSaveCard} className="w-full py-3 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 mt-4">Guardar Tarjeta</button>
+                        <div className="flex gap-2 mt-4">
+                           <button onClick={handleSaveCard} className="flex-1 py-3 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700">Guardar Tarjeta</button>
+                           {editingCardName && (
+                              <button onClick={handleDeleteCard} className="px-4 py-3 bg-red-100 text-red-600 font-bold rounded-lg hover:bg-red-200">
+                                 <Trash2 className="w-5 h-5" />
+                              </button>
+                           )}
+                        </div>
                      </div>
                   </div>
                </div>
@@ -1565,9 +1668,132 @@ export default function App() {
    const renderSettings = () => {
       const isAdmin = currentUser?.role === 'admin';
 
+      if (settingsSection === 'categories') {
+         const currentCats = manageCatType === 'expense' ? expenseCategories : incomeCategories;
+         return (
+            <div className="space-y-6 animate-in fade-in">
+               <div className="flex items-center gap-4">
+                  <button onClick={() => setSettingsSection(null)} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full">
+                     <ChevronDown className="w-6 h-6 rotate-90" />
+                  </button>
+                  <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Gestionar Categorías</h2>
+               </div>
+
+               <div className="flex bg-gray-100 dark:bg-gray-700 p-1 rounded-xl">
+                  <button onClick={() => setManageCatType('expense')} className={`flex-1 py-2 rounded-lg font-bold transition-colors ${manageCatType === 'expense' ? 'bg-white dark:bg-gray-600 shadow text-red-500' : 'text-gray-500'}`}>Gastos</button>
+                  <button onClick={() => setManageCatType('income')} className={`flex-1 py-2 rounded-lg font-bold transition-colors ${manageCatType === 'income' ? 'bg-white dark:bg-gray-600 shadow text-green-500' : 'text-gray-500'}`}>Ingresos</button>
+               </div>
+
+               <div className="space-y-4">
+                  {/* Add New Category */}
+                  <div className="flex gap-2">
+                     <input
+                        placeholder="Nueva Categoría..."
+                        className="flex-1 p-3 bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg"
+                        value={manageNewItem}
+                        onChange={e => setManageNewItem(e.target.value)}
+                     />
+                     <button onClick={handleAddCategory} className="bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700"><Plus className="w-5 h-5" /></button>
+                  </div>
+
+                  {Object.entries(currentCats).map(([cat, subs]: [string, string[]]) => (
+                     <div key={cat} className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 overflow-hidden">
+                        <div className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700/50">
+                           <button onClick={() => setManageSelectedParent(manageSelectedParent === cat ? null : cat)} className="font-bold flex items-center gap-2 flex-1">
+                              {cat}
+                              <ChevronDown className={`w-4 h-4 transition-transform ${manageSelectedParent === cat ? 'rotate-180' : ''}`} />
+                              <span className="text-xs font-normal text-gray-500">({subs.length} sub-cat)</span>
+                           </button>
+                           <button onClick={() => handleDeleteCategory(cat)} className="text-red-500 p-2 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"><Trash2 className="w-4 h-4" /></button>
+                        </div>
+
+                        {manageSelectedParent === cat && (
+                           <div className="p-4 border-t dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50">
+                              <div className="space-y-2 mb-4">
+                                 {subs.map(sub => (
+                                    <div key={sub} className="flex justify-between items-center pl-4 border-l-2 border-gray-200 dark:border-gray-600">
+                                       <span className="text-sm">{sub}</span>
+                                       <button onClick={() => handleDeleteSubCategory(cat, sub)} className="text-red-400 hover:text-red-600"><X className="w-3 h-3" /></button>
+                                    </div>
+                                 ))}
+                              </div>
+                              <div className="flex gap-2">
+                                 <input
+                                    placeholder="Nueva Sub-categoría"
+                                    className="flex-1 p-2 text-sm border rounded dark:bg-gray-700 dark:border-gray-600"
+                                    value={manageNewSubItem}
+                                    onChange={e => setManageNewSubItem(e.target.value)}
+                                 />
+                                 <button onClick={handleAddSubCategory} className="bg-green-600 text-white px-3 rounded hover:bg-green-700"><Plus className="w-4 h-4" /></button>
+                              </div>
+                           </div>
+                        )}
+                     </div>
+                  ))}
+               </div>
+            </div>
+         );
+      }
+
+      if (settingsSection === 'methods') {
+         return (
+            <div className="space-y-6 animate-in fade-in">
+               <div className="flex items-center gap-4">
+                  <button onClick={() => setSettingsSection(null)} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full">
+                     <ChevronDown className="w-6 h-6 rotate-90" />
+                  </button>
+                  <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Métodos de Pago</h2>
+               </div>
+
+               <div className="space-y-4">
+                  <div className="flex gap-2">
+                     <input
+                        placeholder="Nuevo Método..."
+                        className="flex-1 p-3 bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg"
+                        value={manageNewItem}
+                        onChange={e => setManageNewItem(e.target.value)}
+                     />
+                     <button onClick={handleAddMethod} className="bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700"><Plus className="w-5 h-5" /></button>
+                  </div>
+
+                  <div className="grid gap-3">
+                     {Object.keys(paymentMethods).map(method => (
+                        <div key={method} className="bg-white dark:bg-gray-800 p-4 rounded-xl border dark:border-gray-700 flex justify-between items-center">
+                           <span className="font-bold">{method}</span>
+                           {!['Cash', 'Debit Card', 'Credit Card'].includes(method) && (
+                              <button onClick={() => handleDeleteMethod(method)} className="text-red-500 p-2 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"><Trash2 className="w-4 h-4" /></button>
+                           )}
+                           {['Cash', 'Debit Card', 'Credit Card'].includes(method) && (
+                              <span className="text-xs bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-gray-500">System</span>
+                           )}
+                        </div>
+                     ))}
+                  </div>
+               </div>
+            </div>
+         );
+      }
+
       return (
          <div className="space-y-6 animate-in fade-in">
             <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Configuración</h2>
+
+            {/* Data Management */}
+            {isAdmin && (
+               <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700">
+                  <h3 className="font-bold mb-4 flex items-center gap-2 text-gray-900 dark:text-white"><Layers className="w-5 h-5 text-purple-500" /> Gestión de Datos</h3>
+                  <div className="space-y-3">
+                     <button onClick={() => setSettingsSection('categories')} className="w-full flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors">
+                        <span className="font-medium flex items-center gap-2"><Tag className="w-4 h-4" /> Categorías y Subcategorías</span>
+                        <ChevronRight className="w-4 h-4 text-gray-400" />
+                     </button>
+                     <button onClick={() => setSettingsSection('methods')} className="w-full flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors">
+                        <span className="font-medium flex items-center gap-2"><CreditCardIcon className="w-4 h-4" /> Métodos de Pago</span>
+                        <ChevronRight className="w-4 h-4 text-gray-400" />
+                     </button>
+                  </div>
+               </div>
+            )}
 
             {/* User Profile */}
             <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700">
@@ -1609,13 +1835,23 @@ export default function App() {
                   </div>
                ) : (
                   <div className="space-y-4 animate-in fade-in">
-                     <div>
-                        <label className="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase mb-1">Nombre</label>
-                        <input
-                           className="w-full p-2 bg-gray-50 dark:bg-gray-900 rounded-lg border dark:border-gray-600 text-gray-900 dark:text-white"
-                           value={profileForm.name}
-                           onChange={e => setProfileForm({ ...profileForm, name: e.target.value })}
-                        />
+                     <div className="grid grid-cols-2 gap-4">
+                        <div>
+                           <label className="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase mb-1">Nombre</label>
+                           <input
+                              className="w-full p-2 bg-gray-50 dark:bg-gray-900 rounded-lg border dark:border-gray-600 text-gray-900 dark:text-white"
+                              value={profileForm.firstName || ''}
+                              onChange={e => setProfileForm({ ...profileForm, firstName: e.target.value })}
+                           />
+                        </div>
+                        <div>
+                           <label className="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase mb-1">Apellido</label>
+                           <input
+                              className="w-full p-2 bg-gray-50 dark:bg-gray-900 rounded-lg border dark:border-gray-600 text-gray-900 dark:text-white"
+                              value={profileForm.lastName || ''}
+                              onChange={e => setProfileForm({ ...profileForm, lastName: e.target.value })}
+                           />
+                        </div>
                      </div>
                      <div>
                         <label className="block text-xs font-bold text-gray-500 dark:text-gray-400 uppercase mb-1">Email</label>
@@ -1717,6 +1953,13 @@ export default function App() {
                            <span className="text-xs text-gray-400 capitalize bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded">
                               {u.role === 'admin' ? 'Admin' : 'Miembro'}
                            </span>
+                        )}
+
+                        {/* User Delete Button */}
+                        {isAdmin && u.id !== currentUser?.id && (
+                           <button onClick={() => deleteUser(u.id)} className="text-gray-400 hover:text-red-500 p-1">
+                              <X className="w-4 h-4" />
+                           </button>
                         )}
                      </div>
                   ))}

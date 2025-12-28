@@ -88,6 +88,8 @@ export interface User {
   pin?: string; // For simple login
   phoneNumber?: string;
   notificationMethod: 'email' | 'whatsapp' | 'sms' | 'both';
+  firstName?: string; // New split field
+  lastName?: string; // New split field
   role?: 'admin' | 'member'; // Permission level
 }
 
