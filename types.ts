@@ -3,6 +3,7 @@ export interface Family {
   id: number | string;
   name: string;
   createdDate: string;
+  createdBy?: string | number;
 }
 
 export interface Transaction {

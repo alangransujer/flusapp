@@ -20,7 +20,8 @@ import { sendMessageToGemini } from './services/geminiService';
 import {
    checkAndNotifyDueItems,
    getCardStatus,
-   requestNotificationPermission
+   requestNotificationPermission,
+   sendEmail
 } from './services/notificationService';
 import { useAuth } from './src/context/AuthContext';
 import { supabase } from './src/lib/supabaseClient';
@@ -241,6 +242,11 @@ export default function App() {
          setCurrencies(data.currencies || currencies);
          setLastRatesUpdate(data.lastRatesUpdate || null);
          setTheme(data.theme || 'system');
+
+         if (data.currentFamily) {
+            console.log("Restoring family from local storage:", data.currentFamily);
+            setCurrentFamily(data.currentFamily);
+         }
       }
       const aiStudio = getAIStudio();
       if (aiStudio && aiStudio.hasSelectedApiKey) {
@@ -254,14 +260,14 @@ export default function App() {
    useEffect(() => {
       // Only save if we have some data or families to persist
       // This is a safety check to avoid overwriting with empty state during transition/logout
-      if (families.length > 0 || transactions.length > 0) {
+      if (families.length > 0 || currentFamily) {
          localStorage.setItem('expenseTrackerData_v4', JSON.stringify({
-            families, transactions, recurringPatterns, users,
+            families, currentFamily, transactions, recurringPatterns, users,
             expenseCategories, incomeCategories, paymentMethods, creditCardConfigs,
             baseCurrency, exchangeRates, currencies, lastRatesUpdate, theme
          }));
       }
-   }, [families, transactions, recurringPatterns, users, expenseCategories, incomeCategories, paymentMethods, creditCardConfigs, baseCurrency, exchangeRates, currencies, lastRatesUpdate, theme]);
+   }, [families, currentFamily, transactions, recurringPatterns, users, expenseCategories, incomeCategories, paymentMethods, creditCardConfigs, baseCurrency, exchangeRates, currencies, lastRatesUpdate, theme]);
 
    useEffect(() => {
       const html = document.documentElement;
@@ -277,18 +283,67 @@ export default function App() {
       }
    }, [currentFamily, recurringPatterns, users, transactions, creditCardConfigs]);
 
+   // Keep currentUser in sync with the users list (to get preferences, roles, etc. from database)
+   useEffect(() => {
+      if (supabaseUser) {
+         if (users.length > 0) {
+            const match = users.find(u => u.id === supabaseUser.id);
+            if (match) {
+               console.log("Syncing currentUser from profiles list:", match);
+               setCurrentUser(match);
+               return;
+            }
+         }
+
+         // Fallback: If not found in users list yet (e.g. initial load or RLS issue), 
+         // set a basic version so the UI isn't broken
+         if (!currentUser) {
+            console.log("Initializing skeleton currentUser from session");
+            setCurrentUser({
+               id: supabaseUser.id,
+               email: supabaseUser.email || '',
+               name: supabaseUser.email?.split('@')[0] || 'User',
+               notificationMethod: 'email'
+            });
+         }
+      }
+   }, [supabaseUser, users]);
+
+   // Ensure profile exists on login (without wiping existing family_id)
+   useEffect(() => {
+      if (supabaseUser) {
+         supabase.from('profiles').insert([{
+            id: supabaseUser.id,
+            email: supabaseUser.email,
+            name: supabaseUser.email?.split('@')[0] || 'User',
+            updated_at: new Date().toISOString()
+         }]).then(({ error }) => {
+            if (error && error.code !== '23505') { // Ignore "already exists" error
+               console.error("Error ensuring profile exists:", error);
+            }
+         });
+      }
+   }, [supabaseUser]);
+
    // --- AUTH HANDLERS ---
    const handleLogout = async () => {
       await signOut();
       setCurrentFamily(null);
       setCurrentUser(null);
-      setView('dashboard');
       // Clear memory on logout to ensure privacy between users on same device
       setTransactions([]);
       setRecurringPatterns([]);
       setUsers([]);
       setCreditCardConfigs({});
+      setView('dashboard');
    };
+
+   useEffect(() => {
+      if (supabaseUser && currentFamily) {
+         console.log("Session and family ready, fetching data...");
+         fetchFamilyData(currentFamily.id);
+      }
+   }, [supabaseUser, currentFamily?.id]);
 
    const migrateLocalDataToCloud = async (familyId: string | number) => {
       if (!familyId || !currentUser) return;
@@ -383,6 +438,7 @@ export default function App() {
       const hasCloudData = (txs && txs.length > 0);
 
       if (!txError && txs) {
+         console.log(`Fetched ${txs.length} transactions for family ${familyId}`);
          setTransactions(txs.map(t => ({
             id: t.id,
             familyId: t.family_id,
@@ -458,6 +514,27 @@ export default function App() {
          })));
       }
 
+      // Fetch Family Members (Profiles)
+      const { data: memberProfiles, error: profileError } = await supabase
+         .from('profiles')
+         .select('*')
+         .eq('family_id', familyId);
+
+      if (!profileError && memberProfiles) {
+         console.log("Profiles fetched for family:", familyId, memberProfiles);
+         setUsers(memberProfiles.map(p => ({
+            id: p.id,
+            email: p.email || '',
+            name: p.name || p.email?.split('@')[0] || 'User',
+            role: (p.role as 'admin' | 'member') || 'member',
+            familyId: p.family_id,
+            phoneNumber: p.phone_number,
+            notificationMethod: p.notification_method || 'email'
+         })));
+      } else if (profileError) {
+         console.error("Error fetching profiles:", profileError);
+      }
+
       // AUTO MIGRATION CHECK
       // If no data on cloud but we have local data, migrate it!
       if (!hasCloudData && (transactions.filter(t => t.familyId === familyId).length > 0)) {
@@ -467,7 +544,6 @@ export default function App() {
 
    const onFamilySelected = (family: Family) => {
       setCurrentFamily(family);
-      fetchFamilyData(family.id);
       // Ensure the selected family is in our local list for consistent UI
       setFamilies(prev => {
          if (prev.find(f => f.id === family.id)) return prev;
@@ -475,19 +551,33 @@ export default function App() {
       });
       // Find or create local user mapping for this session
       if (supabaseUser) {
+         // Determine role: if user is the creator of the family, they should be admin
+         // (Note: family object from FamilyManager now uses createdBy)
+         const isCreator = family.createdBy === supabaseUser.id;
+         const initialRole = isCreator ? 'admin' : 'member';
+
          // Sync profile with Supabase to enable RLS based on family_id
          supabase.from('profiles').upsert([{
             id: supabaseUser.id,
             email: supabaseUser.email,
             family_id: family.id,
+            name: supabaseUser.email?.split('@')[0] || 'User',
+            role: initialRole, // Upsert the role as well
             updated_at: new Date().toISOString()
-         }]).then(({ error }) => { if (error) console.error("Error syncing profile:", error); });
+         }], { onConflict: 'id' }).then(({ error }) => {
+            if (error) {
+               console.error("Error syncing profile:", error);
+               alert("Error al vincular con la familia: " + error.message);
+            }
+            // Re-fetch EVERYTHING for this family now that RLS is satisfied
+            fetchFamilyData(family.id);
+         });
 
          const localUser: User = {
             id: supabaseUser.id,
             email: supabaseUser.email || '',
             name: supabaseUser.email?.split('@')[0] || 'User',
-            role: 'admin', // Default to admin for now
+            role: initialRole,
             familyId: family.id,
             notificationMethod: 'email'
          };
@@ -497,27 +587,49 @@ export default function App() {
 
    // --- USER PROFILE HANDLERS ---
    const handleEditProfile = () => {
-      if (!currentUser) return;
+      console.log('handleEditProfile: Start', { currentUser });
+      if (!currentUser) {
+         console.warn('handleEditProfile: No currentUser');
+         return;
+      }
       // Split name into first and last if not already set, for editing convenience
       const parts = currentUser.name.split(' ');
       const firstName = currentUser.firstName || parts[0] || '';
       const lastName = currentUser.lastName || parts.slice(1).join(' ') || '';
 
+      console.log('handleEditProfile: Setting form data', { firstName, lastName });
       setProfileForm({ ...currentUser, firstName, lastName });
       setIsEditingProfile(true);
    };
 
    const handleSaveProfile = () => {
-      if (!currentUser || !profileForm) return;
+      console.log('handleSaveProfile: Start', { profileForm });
+      if (!currentUser || !profileForm) {
+         console.warn('handleSaveProfile: Missing data', { currentUser, profileForm });
+         return;
+      }
 
       const fullName = `${profileForm.firstName || ''} ${profileForm.lastName || ''}`.trim();
       const updatedUser = { ...currentUser, ...profileForm, name: fullName || currentUser.name };
 
+      console.log('handleSaveProfile: Updating user', updatedUser);
       // Update local users array
       setUsers(users.map(u => u.id === currentUser.id ? updatedUser : u));
 
       // Update current user session
       setCurrentUser(updatedUser);
+
+      // SYNC WITH SUPABASE
+      supabase.from('profiles').update({
+         name: updatedUser.name,
+         phone_number: updatedUser.phoneNumber,
+         notification_method: updatedUser.notificationMethod,
+         updated_at: new Date().toISOString()
+      }).eq('id', updatedUser.id).then(({ error }) => {
+         if (error) console.error("Error updating profile in Supabase:", error);
+         else console.log("handleSaveProfile: Supabase sync success");
+      });
+
       setIsEditingProfile(false);
    };
 
@@ -526,6 +638,11 @@ export default function App() {
       if (targetUserId === currentUser.id) return alert("No puedes cambiar tu propio rol.");
 
       setUsers(prev => prev.map(u => u.id === targetUserId ? { ...u, role: newRole } : u));
+
+      // SYNC WITH SUPABASE
+      supabase.from('profiles').update({ role: newRole }).eq('id', targetUserId).then(({ error }) => {
+         if (error) console.error("Error updating user role:", error);
+      });
    };
 
    // --- TRANSACTION HANDLERS ---
@@ -583,7 +700,7 @@ export default function App() {
          }
 
          const newPattern: RecurringPattern = {
-            id: editingPattern ? editingPattern.id : Date.now(),
+            id: editingPattern ? editingPattern.id : crypto.randomUUID(),
             familyId: currentFamily.id,
             userId: currentUser.id,
             type: formData.type,
@@ -605,7 +722,7 @@ export default function App() {
 
          // SYNC WITH SUPABASE
          supabase.from('recurring_patterns').upsert([{
-            id: newPattern.id.toString().length > 15 ? newPattern.id : undefined, // only use id if it's a UUID/long string
+            id: newPattern.id,
             family_id: newPattern.familyId,
             user_id: newPattern.userId,
             type: newPattern.type,
@@ -628,7 +745,7 @@ export default function App() {
       } else {
          const installments = formData.installments > 1 ? formData.installments : 1;
          const amountPerQuota = parseFloat((finalAmount / installments).toFixed(2));
-         const parentId = Date.now().toString();
+         const parentId = crypto.randomUUID();
 
          if (originalTx) {
             const updatedTx: Transaction = {
@@ -656,7 +773,12 @@ export default function App() {
                payment_sub_method: updatedTx.paymentSubMethod,
                notes: updatedTx.notes,
                created_at: updatedTx.createdDate
-            }]).then(({ error }) => { if (error) console.error("Error updating transaction:", error); });
+            }]).then(({ error }) => {
+               if (error) {
+                  console.error("Error updating transaction:", error);
+                  alert("Error al actualizar: " + error.message);
+               }
+            });
 
             setTransactions(prev => prev.map(t => t.id === originalTx.id ? updatedTx : t));
          } else {
@@ -665,7 +787,7 @@ export default function App() {
             const baseDate = formData.expirationDate ? new Date(formData.expirationDate + 'T12:00:00') : new Date();
 
             for (let i = 0; i < installments; i++) {
-               const txId = (Date.now() + i).toString();
+               const txId = crypto.randomUUID();
                const createdDate = addMonthsSafe(baseDate, i).toISOString();
 
                const tx: Transaction = {
@@ -703,7 +825,12 @@ export default function App() {
             }
 
             // SYNC WITH SUPABASE
-            supabase.from('transactions').insert(dbTxs).then(({ error }) => { if (error) console.error("Error inserting transactions:", error); });
+            supabase.from('transactions').insert(dbTxs).then(({ error }) => {
+               if (error) {
+                  console.error("Error inserting transactions:", error);
+                  alert("Error al guardar: " + error.message);
+               }
+            });
 
             setTransactions(prev => [...prev, ...newTxs]);
          }
@@ -737,11 +864,22 @@ export default function App() {
       });
       setView('add');
    };
+   const handleDeleteTransaction = async (id: string | number) => {
+      if (!confirm("¿Eliminar esta transacción?")) return;
+
+      setTransactions(prev => prev.filter(t => t.id !== id));
+
+      const { error } = await supabase.from('transactions').delete().eq('id', id);
+      if (error) {
+         console.error("Error deleting transaction:", error);
+         alert("Error al eliminar: " + error.message);
+      }
+   };
 
    const handleMarkAsPaid = (pattern: RecurringPattern) => {
       if (!currentUser || !currentFamily) return;
       const newTx: Transaction = {
-         id: Date.now(), familyId: currentFamily.id, userId: currentUser.id, userName: currentUser.name,
+         id: crypto.randomUUID(), familyId: currentFamily.id, userId: currentUser.id, userName: currentUser.name,
          type: pattern.type, amount: pattern.amount, currency: pattern.currency,
          description: pattern.description, title: pattern.title, category: pattern.category,
          subCategory: pattern.subCategory, paymentMethod: pattern.paymentMethod,
@@ -749,6 +887,30 @@ export default function App() {
          createdDate: new Date().toISOString()
       };
       setTransactions(prev => [...prev, newTx]);
+
+      // SYNC WITH SUPABASE
+      supabase.from('transactions').insert([{
+         id: newTx.id,
+         family_id: newTx.familyId,
+         user_id: newTx.userId,
+         user_name: newTx.userName,
+         type: newTx.type,
+         amount: newTx.amount,
+         currency: newTx.currency,
+         description: newTx.description,
+         title: newTx.title,
+         category: newTx.category,
+         sub_category: newTx.subCategory,
+         payment_method: newTx.paymentMethod,
+         payment_sub_method: newTx.paymentSubMethod,
+         notes: newTx.notes,
+         created_at: newTx.createdDate
+      }]).then(({ error }) => {
+         if (error) {
+            console.error("Error saving paid transaction:", error);
+            alert("Error al registrar pago: " + error.message);
+         }
+      });
 
       // Calculate Next Due Date (Non-destructive override logic)
       const currentDueDate = new Date(pattern.nextDueDate + 'T12:00:00');
@@ -885,6 +1047,12 @@ export default function App() {
       if (familyUsers.length <= 1) return alert("Cannot delete last user");
       if (confirm("Delete this user?")) {
          setUsers(u => u.filter(x => x.id !== id));
+
+         // SYNC WITH SUPABASE (Remove from family)
+         supabase.from('profiles').update({ family_id: null }).eq('id', id).then(({ error }) => {
+            if (error) console.error("Error removing user from family:", error);
+         });
+
          if (currentUser?.id === id) handleLogout();
       }
    };
@@ -1327,6 +1495,53 @@ export default function App() {
                         <Bar dataKey="Gastos" fill="#ef4444" radius={[4, 4, 0, 0]} />
                      </BarChart>
                   </ResponsiveContainer>
+               </div>
+            </div>
+
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700">
+               <div className="flex justify-between items-center mb-6">
+                  <h3 className="font-bold text-gray-900 dark:text-white">Listado de Transacciones ({analyticsYear})</h3>
+                  <div className="flex gap-2">
+                     <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full">{yearlyTxs.filter(t => t.type === 'income').length} Ingresos</span>
+                     <span className="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-full">{yearlyTxs.filter(t => t.type === 'expense').length} Gastos</span>
+                  </div>
+               </div>
+
+               <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left">
+                     <thead className="text-xs uppercase bg-gray-50 dark:bg-gray-700/50 text-gray-500">
+                        <tr>
+                           <th className="px-4 py-3">Fecha</th>
+                           <th className="px-4 py-3">Descripción</th>
+                           <th className="px-4 py-3">Categoría</th>
+                           <th className="px-4 py-3">Monto</th>
+                           <th className="px-4 py-3 text-right">Acciones</th>
+                        </tr>
+                     </thead>
+                     <tbody className="divide-y dark:divide-gray-700">
+                        {yearlyTxs.map(t => (
+                           <tr key={t.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30 group">
+                              <td className="px-4 py-3">{new Date(t.createdDate).toLocaleDateString()}</td>
+                              <td className="px-4 py-3 font-medium text-gray-900 dark:text-white">{t.title || t.description}</td>
+                              <td className="px-4 py-3">
+                                 <span className="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-[10px]">{t.category}</span>
+                              </td>
+                              <td className={`px-4 py-3 font-bold ${t.type === 'income' ? 'text-green-600' : 'text-gray-900 dark:text-white'}`}>
+                                 {t.type === 'expense' ? '-' : '+'}{formatCurrency(t.amount, t.currency)}
+                              </td>
+                              <td className="px-4 py-3 text-right space-x-2">
+                                 <button onClick={() => handleEditTransaction(t)} className="p-1 text-gray-400 hover:text-blue-500 opacity-0 group-hover:opacity-100"><Edit2 className="w-4 h-4" /></button>
+                                 <button onClick={() => handleDeleteTransaction(t.id)} className="p-1 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100"><Trash2 className="w-4 h-4" /></button>
+                              </td>
+                           </tr>
+                        ))}
+                        {yearlyTxs.length === 0 && (
+                           <tr>
+                              <td colSpan={5} className="px-4 py-10 text-center text-gray-500 italic">No hay transacciones registradas en {analyticsYear}</td>
+                           </tr>
+                        )}
+                     </tbody>
+                  </table>
                </div>
             </div>
          </div>
@@ -1908,8 +2123,8 @@ export default function App() {
                         : new Date(t.createdDate).toLocaleDateString();
 
                      return (
-                        <div key={t.id} className="flex items-center justify-between group hover:bg-gray-50 dark:hover:bg-gray-700/50 p-2 rounded-lg transition-colors -mx-2 cursor-pointer" onClick={() => handleEditTransaction(t)}>
-                           <div className="flex items-center gap-4">
+                        <div key={t.id} className="flex items-center justify-between group hover:bg-gray-50 dark:hover:bg-gray-700/50 p-2 rounded-lg transition-colors -mx-2">
+                           <div className="flex items-center gap-4 cursor-pointer flex-1" onClick={() => handleEditTransaction(t)}>
                               <div className={`p-3 rounded-full ${t.category === 'Food' ? 'bg-orange-100 text-orange-600 dark:bg-orange-900/30' :
                                  t.category === 'Utilities' ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/30' :
                                     t.type === 'income' ? 'bg-green-100 text-green-600 dark:bg-green-900/30' :
@@ -1926,18 +2141,24 @@ export default function App() {
                               </div>
                            </div>
 
-                           <div className="flex items-center gap-8">
-                              <div className="hidden md:block">
+                           <div className="flex items-center gap-4">
+                              <div className="text-right hidden md:block">
                                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300">
                                     {t.category}
                                  </span>
                               </div>
-                              <div className="text-right">
-                                 <p className="text-sm text-gray-500 mb-0.5">{dateLabel}</p>
+                              <div className="text-right min-w-[80px]">
+                                 <p className="text-[10px] text-gray-500 mb-0.5">{dateLabel}</p>
                                  <p className={`font-bold ${t.type === 'income' ? 'text-green-600 dark:text-green-400' : 'text-gray-900 dark:text-white'}`}>
                                     {t.type === 'expense' ? '-' : '+'}{formatCurrency(t.amount, t.currency)}
                                  </p>
                               </div>
+                              <button
+                                 onClick={(e) => { e.stopPropagation(); handleDeleteTransaction(t.id); }}
+                                 className="p-2 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                              >
+                                 <Trash2 className="w-4 h-4" />
+                              </button>
                            </div>
                         </div>
                      )
@@ -2111,9 +2332,33 @@ export default function App() {
                            <p className="text-xs text-gray-500 uppercase mb-1 flex items-center gap-1"><Phone className="w-3 h-3" /> Teléfono</p>
                            <p className="font-medium text-gray-900 dark:text-white">{currentUser?.phoneNumber || 'No configurado'}</p>
                         </div>
-                        <div className="bg-gray-50 dark:bg-gray-700 p-3 rounded-lg">
+                        <div className="bg-gray-50 dark:bg-gray-700 p-3 rounded-lg relative group">
                            <p className="text-xs text-gray-500 uppercase mb-1 flex items-center gap-1"><Bell className="w-3 h-3" /> Notificaciones</p>
                            <p className="font-medium text-gray-900 dark:text-white uppercase">{currentUser?.notificationMethod || 'EMAIL'}</p>
+                           <button
+                              onClick={async () => {
+                                 console.log('Test email button clicked');
+                                 if (!currentUser) {
+                                    alert('Error: No currentUser found. Esperando sincronización...');
+                                    return;
+                                 }
+                                 try {
+                                    const result = await sendEmail(currentUser, 'FlusApp Test Email', '¡Felicidades! La integración con Resend y Supabase Edge Functions está funcionando correctamente.', true);
+                                    if (result.success) {
+                                       alert('✅ Email de prueba enviado (Check inbox)');
+                                    } else {
+                                       alert(`❌ Error: ${result.error}. Revisa Supabase Logs -> Edge Functions -> send-email.`);
+                                    }
+                                 } catch (err) {
+                                    console.error('Test email button crash:', err);
+                                    alert('💥 Error inesperado: ' + err.message);
+                                 }
+                              }}
+                              className="absolute top-2 right-2 p-1 text-blue-500 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                              title="Enviar Email de Prueba"
+                           >
+                              <Send className="w-3 h-3" />
+                           </button>
                         </div>
                      </div>
                   </div>

@@ -32,7 +32,8 @@ export default function FamilyManager({ onSelectFamily }: FamilyManagerProps) {
             setFamilies(data.map(f => ({
                 id: f.id,
                 name: f.name,
-                createdDate: f.created_at
+                createdDate: f.created_at,
+                createdBy: f.created_by
             })));
         }
         setLoading(false);
